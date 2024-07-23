@@ -19,13 +19,16 @@
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
 #include <string.h> // Include the string.h header for strlen function
-#include <stdbool.h>  // Add this line
+#include <stdbool.h>  //
 #include <stdio.h>
 #include "i2c_max11611.h"
 extern UART_HandleTypeDef huart1;
 DMA_HandleTypeDef hdma_adc;
 
 uint32_t adc_values[2];
+uint32_t max11611_adc_values[4];
+
+
 
 #define ADC_RESOLUTION 4096
 #define VREF 3.3
@@ -41,7 +44,20 @@ uint32_t adc_values[2];
 #define LOW_DURATION_THRESHOLD 2000 // 2 seconds in milliseconds
 #define VOLTAGE_CHECK_INTERVAL 15000 // 15 seconds in milliseconds
 #define BLINK_FREQUENCY 2000 // 2 kHz
+
+
+
+
+extern uint16_t adc8_value;  // These should be updated by your ADC reading functions
+extern uint16_t adc9_value;
+
+uint16_t adc8_value = 0;
+uint16_t adc9_value = 0;
+
+
+
 /* USER CODE END Includes */
+
 
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
@@ -88,11 +104,22 @@ static void MX_I2C2_Init(void);
 static void MX_USART1_UART_Init(void);
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin);
 
+
+
 void sys_isense_adc8(void);
 void pwrin_vsense_adc9(void);
 
 void handle_pin_transitions(void);
 uint8_t Check_Power_Good_Pins(void);
+
+
+bool check_voltage_conditions(void);
+bool check_max11611_voltage_conditions(uint8_t devAddr);
+bool check_power_good_pins_conditions(void);
+bool Power_Conditioning_Check(uint8_t devAddr);
+
+
+
 
 uint32_t read_adc_channel(uint32_t channel);
 
@@ -105,7 +132,7 @@ float AdcRead(uint32_t channel, uint8_t numAverage);
 
 
 void display_menu() {
-    char menu[] = "Menu:\r\n1. Test Max11611 Values\r\n2. Reset uC\r\n3. Read Vsense\r\n4. Read Isense\r\n5. Check Power Good Pins\r\n";
+    char menu[] = "Menu:\r\n1. Test Max11611 Values\r\n2. Reset uC\r\n3. Read Vsense\r\n4. Read Isense\r\n5. Check Power Good Pins\r\n6. Check Max11611 Voltage Conditions\r\n7. Check Power Good Pins Status\r\n8. Power Conditioning Check\r\n";
     HAL_UART_Transmit(&huart1, (uint8_t*)menu, strlen(menu), HAL_MAX_DELAY);
 }
 
@@ -134,44 +161,212 @@ void handle_menu_selection(uint8_t selection) {
         case '4':
             sys_isense_adc8();
             break;
+
         case '5': {
-            uint8_t power_good = Check_Power_Good_Pins();
-            if (power_good) {
-                char msg[] = "Power is good.\r\n";
-                HAL_UART_Transmit(&huart1, (uint8_t*)msg, strlen(msg), HAL_MAX_DELAY);
-            } else {
-                char msg[] = "Power is NOT good.\r\n";
-                HAL_UART_Transmit(&huart1, (uint8_t*)msg, strlen(msg), HAL_MAX_DELAY);
-            }
-            break;
+                    bool result = check_voltage_conditions();
+                    if (result) {
+                        char msg[] = "Voltage conditions met (both >= 0.2V).\r\n";
+                        HAL_UART_Transmit(&huart1, (uint8_t*)msg, strlen(msg), HAL_MAX_DELAY);
+                    } else {
+                        char msg[] = "Voltage conditions not met (at least one < 0.2V).\r\n";
+                        HAL_UART_Transmit(&huart1, (uint8_t*)msg, strlen(msg), HAL_MAX_DELAY);
+                    }
+                    break;
+                    }
+        case '6': {
+                    bool voltage_ok = check_max11611_voltage_conditions(MAX11611_ADDRESS);
+                    if (voltage_ok) {
+                        char msg[] = "Max11611 Voltage conditions met (all channels >= 0.2V).\r\n";
+                        HAL_UART_Transmit(&huart1, (uint8_t*)msg, strlen(msg), HAL_MAX_DELAY);
+                    } else {
+                        char msg[] = "Max11611 Voltage conditions not met (at least one channel < 0.2V).\r\n";
+                        HAL_UART_Transmit(&huart1, (uint8_t*)msg, strlen(msg), HAL_MAX_DELAY);
+                    }
+                    break;
+                }
+        case '7': {
+                    // New case for checking power good pins status
+                    bool status_ok = check_power_good_pins_conditions();
+                    if (status_ok) {
+                        char msg[] = "All Power Good Pins are high.\r\n";
+                        HAL_UART_Transmit(&huart1, (uint8_t*)msg, strlen(msg), HAL_MAX_DELAY);
+                    } else {
+                        char msg[] = "One or more Power Good Pins are low.\r\n";
+                        HAL_UART_Transmit(&huart1, (uint8_t*)msg, strlen(msg), HAL_MAX_DELAY);
+                    }
         }
-        default:
-            break;
+
+
+        case '8': {
+                    // New case for Power Conditioning Check
+                    bool power_condition_ok = Power_Conditioning_Check(MAX11611_ADDRESS);
+                    if (power_condition_ok) {
+                        char msg[] = "All conditions are OK.\r\n";
+                        HAL_UART_Transmit(&huart1, (uint8_t*)msg, strlen(msg), HAL_MAX_DELAY);
+                    } else {
+                        char msg[] = "One or more conditions failed. Actions taken.\r\n";
+                        HAL_UART_Transmit(&huart1, (uint8_t*)msg, strlen(msg), HAL_MAX_DELAY);
+                    }
+        }
     }
 
     // Display menu again after handling selection
     display_menu();
 }
 
+void read_adc_values() {
+    // Assuming these functions update adc8_value and adc9_value
+    pwrin_vsense_adc9();
+    sys_isense_adc8();
+}
+
+// Function to check the specific voltage conditions
+
 
 
 void sys_isense_adc8(void) {
     uint32_t adc8_value = adc_values[0];
-    float voltage = (float)adc8_value * VREF / ADC_RESOLUTION;
+    float voltage8 = (float)adc8_value * VREF / ADC_RESOLUTION;
 
     char buffer[100];
-    snprintf(buffer, sizeof(buffer), "Isense Value: %lu, Voltage: %.2fV\r\n", adc8_value, voltage);
+    snprintf(buffer, sizeof(buffer), "Isense Value: %lu, Voltage: %.2fV\r\n", adc8_value, voltage8);
     HAL_UART_Transmit(&huart1, (uint8_t*)buffer, strlen(buffer), HAL_MAX_DELAY);
 }
 
 void pwrin_vsense_adc9(void) {
     uint32_t adc9_value = adc_values[1];
-    float voltage = (float)adc9_value * VREF / ADC_RESOLUTION;
+    float voltage9 = (float)adc9_value * VREF / ADC_RESOLUTION;
 
     char buffer[100];
-    snprintf(buffer, sizeof(buffer), "Vsense Value: %lu, Voltage: %.2fV\r\n", adc9_value, voltage);
+    snprintf(buffer, sizeof(buffer), "Vsense Value: %lu, Voltage: %.2fV\r\n", adc9_value, voltage9);
     HAL_UART_Transmit(&huart1, (uint8_t*)buffer, strlen(buffer), HAL_MAX_DELAY);
 }
+
+
+// Power Conditioning
+bool check_voltage_conditions(void) {
+    // Call the functions to update adc8_value and adc9_value
+    pwrin_vsense_adc9();
+    sys_isense_adc8();
+
+    // Calculate the voltages
+    uint32_t adc8_value = adc_values[0];
+        float voltage8 = (float)adc8_value * VREF / ADC_RESOLUTION;
+        uint32_t adc9_value = adc_values[1];
+            float voltage9 = (float)adc9_value * VREF / ADC_RESOLUTION;
+
+    // Print the voltages for debugging purposes
+    char buffer[100];
+    snprintf(buffer, sizeof(buffer), "Debug - Isense Voltage: %.2fV, Vsense Voltage: %.2fV\r\n", voltage8, voltage9);
+    HAL_UART_Transmit(&huart1, (uint8_t*)buffer, strlen(buffer), HAL_MAX_DELAY);
+
+    // Check if the voltages are above or equal to 0.2V
+    return (voltage8 >= 0.2f && voltage9 >= 0.2f);
+}
+bool check_max11611_voltage_conditions(uint8_t devAddr) {
+    uint32_t volt[4]; // Array to store the voltages of the 4 channels
+    float voltage[4];
+    char buffer[200]; // Adjust buffer size to accommodate all channels
+    const float VREF_CONST = 3.3f; // Adjust VREF as per your reference voltage
+    const uint32_t ADC_RESOLUTION_CONST = 4096; // Adjust based on your ADC resolution
+
+    // Read the ADC values for the 4 channels
+    i2c_readMax11611Adc(devAddr); // Call the original function
+
+    // Copy the values to local array
+    for (int i = 0; i < 4; i++) {
+        volt[i] = max11611_adc_values[i];
+    }
+
+    // Calculate the voltages
+    for (int i = 0; i < 4; i++) {
+        voltage[i] = (float)volt[i] * VREF_CONST / ADC_RESOLUTION_CONST;
+    }
+
+    // Print the voltages for debugging purposes
+    snprintf(buffer, sizeof(buffer), "Debug - AIN0 Voltage: %.2fV, AIN1 Voltage: %.2fV, AIN2 Voltage: %.2fV, AIN3 Voltage: %.2fV\r\n",
+             voltage[0], voltage[1], voltage[2], voltage[3]);
+    HAL_UART_Transmit(&huart1, (uint8_t*)buffer, strlen(buffer), HAL_MAX_DELAY);
+
+    // Check if the voltages are above or equal to 0.2V for all channels
+    return (voltage[0] >= 0.2f && voltage[1] >= 0.2f && voltage[2] >= 0.2f && voltage[3] >= 0.2f);
+}
+bool check_power_good_pins_conditions(void) {
+    char buffer[200];
+
+    // Check GPIO pin states
+    GPIO_PinState pin_states[5] = {
+        HAL_GPIO_ReadPin(CORE_3V3_5V_PG_GPIO_Port, CORE_3V3_5V_PG_Pin),
+        HAL_GPIO_ReadPin(CORE_PWR_ISO_PG_GPIO_Port, CORE_PWR_ISO_PG_Pin),
+        HAL_GPIO_ReadPin(CORE_PWR_CONN_PG_GPIO_Port, CORE_PWR_CONN_PG_Pin),
+        HAL_GPIO_ReadPin(V3_PG_GPIO_Port, V3_PG_Pin),
+        HAL_GPIO_ReadPin(V3STB_PG_GPIO_Port, V3STB_PG_Pin)
+    };
+
+    snprintf(buffer, sizeof(buffer),
+        "Debug - Power Good Pins States:\r\n"
+        "CORE_3V3_5V_PG: %s\r\n"
+        "CORE_PWR_ISO_PG: %s\r\n"
+        "CORE_PWR_CONN_PG: %s\r\n"
+        "V3_PG: %s\r\n"
+        "V3STB_PG: %s\r\n",
+        pin_states[0] == GPIO_PIN_SET ? "HIGH" : "LOW",
+        pin_states[1] == GPIO_PIN_SET ? "HIGH" : "LOW",
+        pin_states[2] == GPIO_PIN_SET ? "HIGH" : "LOW",
+        pin_states[3] == GPIO_PIN_SET ? "HIGH" : "LOW",
+        pin_states[4] == GPIO_PIN_SET ? "HIGH" : "LOW"
+    );
+    HAL_UART_Transmit(&huart1, (uint8_t*)buffer, strlen(buffer), HAL_MAX_DELAY);
+
+    // Check if all pins are HIGH
+    for (int i = 0; i < 5; i++) {
+        if (pin_states[i] != GPIO_PIN_SET) {
+            HAL_GPIO_WritePin(MAIN_PWR_ENABLE_GPIO_Port, MAIN_PWR_ENABLE_Pin, GPIO_PIN_RESET);
+            HAL_Delay(1500);
+            HAL_GPIO_WritePin(CORE_RST_IN_GPIO_Port, CORE_RST_IN_Pin, GPIO_PIN_SET);
+            return false;
+        }
+    }
+    return true;
+}
+
+bool Power_Conditioning_Check(uint8_t devAddr) {
+    // Check the conditions
+    bool voltage_ok = check_voltage_conditions();
+    bool max11611_voltage_ok = check_max11611_voltage_conditions(devAddr);
+    bool power_good_pins_ok = check_power_good_pins_conditions();
+
+    // If any condition is false, take action
+    if (!voltage_ok || !max11611_voltage_ok || !power_good_pins_ok) {
+        // Print debug information about which condition failed
+        char buffer[200];
+        snprintf(buffer, sizeof(buffer),
+                 "Condition Check Results:\r\n"
+                 "Voltage Condition: %s\r\n"
+                 "MAX11611 Voltage Condition: %s\r\n"
+                 "Power Good Pins Condition: %s\r\n",
+                 voltage_ok ? "OK" : "FAIL",
+                 max11611_voltage_ok ? "OK" : "FAIL",
+                 power_good_pins_ok ? "OK" : "FAIL");
+        HAL_UART_Transmit(&huart1, (uint8_t*)buffer, strlen(buffer), HAL_MAX_DELAY);
+
+        // Set MAIN_PWR_ENABLE_Pin low for 120 seconds
+        HAL_GPIO_WritePin(MAIN_PWR_ENABLE_GPIO_Port, MAIN_PWR_ENABLE_Pin, GPIO_PIN_RESET);
+        HAL_Delay(120000);
+
+        // Set CORE_RST_IN_Pin low for 2 seconds
+        HAL_GPIO_WritePin(CORE_RST_IN_GPIO_Port, CORE_RST_IN_Pin, GPIO_PIN_RESET);
+        HAL_Delay(2000);
+
+        // Reset pins to their default states
+        HAL_GPIO_WritePin(CORE_RST_IN_GPIO_Port, CORE_RST_IN_Pin, GPIO_PIN_SET);
+
+        return false;
+    }
+
+    return true;
+}
+
 
 
 uint32_t read_adc_channel(uint32_t channel) {
@@ -260,61 +455,7 @@ void handle_pin_transitions(void) {
         core_rst_in_active = false;
     }
 }
-uint8_t Check_Power_Good_Pins(void) {
-    // Check GPIO pin states
-    if (HAL_GPIO_ReadPin(CORE_3V3_5V_PG_GPIO_Port, CORE_3V3_5V_PG_Pin) != GPIO_PIN_SET ||
-        HAL_GPIO_ReadPin(CORE_PWR_ISO_PG_GPIO_Port, CORE_PWR_ISO_PG_Pin) != GPIO_PIN_SET ||
-        HAL_GPIO_ReadPin(CORE_PWR_CONN_PG_GPIO_Port, CORE_PWR_CONN_PG_Pin) != GPIO_PIN_SET ||
-        HAL_GPIO_ReadPin(V3_PG_GPIO_Port, V3_PG_Pin) != GPIO_PIN_SET ||
-        HAL_GPIO_ReadPin(V3STB_PG_GPIO_Port, V3STB_PG_Pin) != GPIO_PIN_SET) {
-        // Not all pins are high
-        HAL_GPIO_WritePin(MAIN_PWR_ENABLE_GPIO_Port, MAIN_PWR_ENABLE_Pin, GPIO_PIN_RESET);
-        HAL_Delay(1500);
-        HAL_GPIO_WritePin(CORE_RST_IN_GPIO_Port, CORE_RST_IN_Pin, GPIO_PIN_SET);
-        return 0;
-    }
 
-    // Read ADC values from channels 1 to 4
-    uint32_t volt[4];
-    for (int i = 0; i < 4; i++) {
-        uint8_t response[2];
-        uint16_t val;
-        HAL_StatusTypeDef status;
-
-        // Configure which channels to read
-        uint8_t config = 0b01100001 | (i << 1); // sel[0:2] = read channel as in CS[0:3], single ended
-        status = HAL_I2C_Master_Transmit(&hi2c2, (MAX11611_ADDRESS << 1), &config, sizeof(config), HAL_MAX_DELAY);
-        if (status != HAL_OK) {
-            char error_msg[50];
-            snprintf(error_msg, sizeof(error_msg), "I2C Tx Error on ch %d of MAX11611.\r\n", i);
-            HAL_UART_Transmit(&huart1, (uint8_t*)error_msg, strlen(error_msg), HAL_MAX_DELAY);
-            return 0; // Error in I2C transmission
-        }
-
-        status = HAL_I2C_Master_Receive(&hi2c2, (MAX11611_ADDRESS << 1), response, sizeof(response), HAL_MAX_DELAY);
-        if (status != HAL_OK) {
-            char error_msg[50];
-            snprintf(error_msg, sizeof(error_msg), "I2C Rx Error on ch %d of MAX11611.\r\n", i);
-            HAL_UART_Transmit(&huart1, (uint8_t*)error_msg, strlen(error_msg), HAL_MAX_DELAY);
-            return 0; // Error in I2C reception
-        }
-
-        val = ((response[0] & 0x03) << 8) | response[1];
-        volt[i] = val * 2;  // Adjust this calculation based on your voltage conversion needs
-
-        // Check if any ADC value is greater than 1900
-        if (volt[i] > 1900) {
-            HAL_GPIO_WritePin(MAIN_PWR_ENABLE_GPIO_Port, MAIN_PWR_ENABLE_Pin, GPIO_PIN_SET);
-            return 1; // All conditions are met
-        }
-    }
-
-    // If any condition fails
-    HAL_GPIO_WritePin(MAIN_PWR_ENABLE_GPIO_Port, MAIN_PWR_ENABLE_Pin, GPIO_PIN_RESET);
-    HAL_Delay(1500);
-    HAL_GPIO_WritePin(CORE_RST_IN_GPIO_Port, CORE_RST_IN_Pin, GPIO_PIN_SET);
-    return 0; // Not all conditions are met
-}
 
 
 

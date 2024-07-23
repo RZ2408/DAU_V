@@ -10,6 +10,7 @@
 #include <stdio.h>
 #include <string.h>
 
+
 // Include UART header
 
 extern I2C_HandleTypeDef hi2c2;
@@ -21,7 +22,6 @@ void i2c_readMax11611Adc(uint8_t devAddr) {
     uint8_t response[2];
     uint16_t val;
     char buffer[50];
-    uint32_t volt[12];
 
     // Setup: AIN/REF=internal ref & ref. output, internal clock, unipolar, no config reset
     setup = 0b11110010;
@@ -53,10 +53,11 @@ void i2c_readMax11611Adc(uint8_t devAddr) {
         }
 
         val = ((response[0] & 0x03) << 8) | response[1];
-        volt[i] = val * 2;  // Adjust this calculation based on your voltage conversion needs
+        max11611_adc_values[i] = val * 2;  // Store the values in the global array
 
         // Print raw ADC values over UART
-        snprintf(buffer, sizeof(buffer), "AIN%d Raw ADC Value: %lu\r\n", i, volt[i]);
+        snprintf(buffer, sizeof(buffer), "AIN%d Raw ADC Value: %lu\r\n", i, max11611_adc_values[i]);
         HAL_UART_Transmit(&huart1, (uint8_t*)buffer, strlen(buffer), HAL_MAX_DELAY);
     }
 }
+
